@@ -1,0 +1,13 @@
+# 实测数据留在本地，不进仓库 —— 本仓库只放工具
+# 评测结果是你自己的数据（含 IP、主机名、业务信息），没有任何理由提交上来
+/results/*
+!/results/hosts.tsv.example
+!/results/.gitkeep
+
+# 编辑器 / 系统
+.DS_Store
+*.swp
+*.tmp
+
+# 构建产物（本仓库不再含 Go 代码，但保留规则防误入）
+/cloud-bench
