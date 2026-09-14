@@ -32,7 +32,8 @@ import sys
 from collections import OrderedDict
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RESULTS = os.path.join(REPO_ROOT, "results")
+# 产物目录：可用 CB_RESULTS_DIR 覆盖 —— 工具与数据可以分处两个仓库
+RESULTS = os.environ.get("CB_RESULTS_DIR") or os.path.join(REPO_ROOT, "results")
 HOSTS = os.path.join(RESULTS, "hosts.tsv")
 OUT_DIR = os.path.join(RESULTS, "summary")
 

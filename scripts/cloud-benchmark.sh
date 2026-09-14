@@ -28,6 +28,10 @@
 #      ./scripts/cloud-benchmark.sh summarize
 #   6) 单机「人话报告」——面向入门：把数字翻译成「会不会卡 / 是不是虚标 / 能跑什么」
 #      ./scripts/cloud-benchmark.sh report --name mycloud-2c2g-01
+#   7) 提交结果到站点（先 --dry-run 看一眼要传什么，确认后再提交）
+#      ./scripts/cloud-benchmark.sh submit --name mycloud-2c2g-01 --api https://bench.example.com --dry-run
+#      export BENCH_API_KEY=xxx     # 密钥用环境变量传，别写进命令行（会留在 shell 历史）
+#      ./scripts/cloud-benchmark.sh submit --name mycloud-2c2g-01 --api https://bench.example.com
 #
 # 设计原则：
 #   - 被测主机上不安装任何 AI agent / 常驻进程，只装评测工具（fio/sysbench/...），
@@ -62,7 +66,10 @@ set -uo pipefail
 # ---------------------------------------------------------------------------
 SCRIPT_VERSION="1.0.0"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RESULTS_DIR="$REPO_ROOT/results"
+# 产物目录：默认本仓库的 results/，可用 CB_RESULTS_DIR 覆盖。
+# 这样「工具在公开仓库、实测数据在私有工作区」也能跑——评测数据是使用者自己的，
+# 没必要（也不应该）塞进工具仓库。
+RESULTS_DIR="${CB_RESULTS_DIR:-$REPO_ROOT/results}"
 HOSTS_FILE="$RESULTS_DIR/hosts.tsv"
 # 远端工作目录：用 ~ 让远端 shell 展开，root 与普通用户（ubuntu）都适用。
 # 注意：这两个变量传给远端时**不能加引号**，否则 ~ 不会展开。
@@ -1087,6 +1094,42 @@ cmd_summarize() {
   python3 "$REPO_ROOT/scripts/cloud-benchmark-summarize.py" || die "汇总脚本执行失败"
 }
 
+# 提交评测结果到站点（先本地生成 JSON，再 POST）
+# 面向初级用户的关键设计：默认先 dry-run 给用户看一眼要上传什么，确认后再提交。
+cmd_submit() {
+  local name="" api="" key="" dry=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name)    name="$2"; shift 2 ;;
+      --api)     api="$2"; shift 2 ;;
+      --key)     key="$2"; shift 2 ;;
+      --dry-run) dry=1; shift ;;
+      *) die "未知参数: $1" ;;
+    esac
+  done
+  [ -n "$name" ] || die "用法: $0 submit --name <主机名> --api <站点URL> [--dry-run]"
+  api="${api:-${BENCH_API_URL:-}}"
+
+  # 本地生成（同时把「哪些指标没测到」提示出来，避免把一堆 0 值传上去还不自知）
+  if [ -n "$dry" ]; then
+    python3 "$REPO_ROOT/scripts/to-result.py" --name "$name" --results "$RESULTS_DIR" \
+      || die "生成结果 JSON 失败"
+    c_info "以上是即将提交的内容（--dry-run，未上传）"
+    return 0
+  fi
+
+  [ -n "$api" ] || die "缺少站点地址：--api <URL> 或 export BENCH_API_URL=..."
+  # 密钥优先取环境变量：写成 --key 参数会留在 shell 历史里
+  local k="${key:-${BENCH_API_KEY:-}}"
+  [ -n "$k" ] || die "缺少提交密钥：推荐 export BENCH_API_KEY=xxx；也可用 --key（注意会留在命令历史）"
+
+  c_head "提交 $name 的评测结果 → $api"
+  BENCH_API_KEY="$k" python3 "$REPO_ROOT/scripts/to-result.py" \
+    --name "$name" --results "$RESULTS_DIR" --submit "$api" \
+    || die "提交失败（见上方错误信息）"
+  c_ok "已提交"
+}
+
 # 单机「人话报告」——面向初级用户：把指标翻译成「会不会卡 / 是不是虚标 / 能跑什么」
 cmd_report() {
   local name=""
@@ -1110,6 +1153,7 @@ main() {
   case "$cmd" in
     run)       cmd_run "$@" ;;
     report)    cmd_report "$@" ;;
+    submit)    cmd_submit "$@" ;;
     status)    cmd_status "$@" ;;
     collect)   cmd_collect "$@" ;;
     iperf)     cmd_iperf "$@" ;;
