@@ -6,10 +6,17 @@
 #
 # 用法：
 #   0) 追加新主机：编辑 results/hosts.tsv 加一行，然后按 1) 跑即可
-#   1) 远端跑测试（默认全部阶段，tmux 后台执行，SSH 断连不中断）
-#      ./scripts/cloud-benchmark.sh run --name tencent-2c2g-03
-#      ./scripts/cloud-benchmark.sh run --name tencent-2c2g-03 --stages env,deps,fio
-#      ./scripts/cloud-benchmark.sh run --name tencent-2c2g-03 --at 23:30   # 远端定时开跑
+#   1) 远端跑测试（tmux 后台执行，SSH 断连不中断）
+#      ./scripts/cloud-benchmark.sh run --name mycloud-2c2g-01
+#         默认档位 quick（约 16 分钟）：磁盘 p99 / 超售 %steal / 物理核识别
+#         —— 轻量云最关心的三项全在这里，且是 YABS/bench.sh 测不出来的
+#      ./scripts/cloud-benchmark.sh run --name mycloud-2c2g-01 --profile standard
+#         约 40 分钟：加 YABS 交叉验证 + PTS（7-Zip / redis）
+#      ./scripts/cloud-benchmark.sh run --name mycloud-2c2g-01 --profile full
+#         约 2.5 小时：全量，含 PTS 内核编译（轻量云一般用不到）
+#      ./scripts/cloud-benchmark.sh run --name mycloud-2c2g-01 --stages env,deps,fio
+#         只跑指定阶段（逗号分隔，逐项覆盖档位预设）
+#      ./scripts/cloud-benchmark.sh run --name mycloud-2c2g-01 --at 23:30   # 远端定时开跑
 #         （--at 的等待在**远端**计算，本机关机/断网都不影响；跑生产机时用它卡低峰窗口）
 #   2) 查看进度（tail 远端日志 / 阶段完成情况）
 #      ./scripts/cloud-benchmark.sh status --name tencent-2c2g-03
@@ -19,6 +26,8 @@
 #      ./scripts/cloud-benchmark.sh iperf --a tencent-2c2g-03 --b volc-4c8g-01
 #   5) 汇总所有已回收结果 → results/summary/compare.{csv,md}
 #      ./scripts/cloud-benchmark.sh summarize
+#   6) 单机「人话报告」——面向入门：把数字翻译成「会不会卡 / 是不是虚标 / 能跑什么」
+#      ./scripts/cloud-benchmark.sh report --name mycloud-2c2g-01
 #
 # 设计原则：
 #   - 被测主机上不安装任何 AI agent / 常驻进程，只装评测工具（fio/sysbench/...），
@@ -32,10 +41,12 @@
 #   env      前置检查 + 系统信息（lscpu/free/lsblk/os-release/虚拟化）→ system-info.txt
 #   deps     安装评测工具（fio sysbench iperf3 stress-ng sysstat + PTS 的 php 扩展）
 #   yabs     YABS 快速跑分（CPU + fio + iperf3 一次出结果，保留 JSON）
-#   pts      Phoronix Test Suite 固定 6 项（8 小时超时，build-linux-kernel 很慢）
+#   pts      Phoronix Test Suite（**standard/full 档才跑**；内核编译一项就要 87 分钟，
+#            轻量云场景用不到，故 quick 档默认跳过）
 #   fio      磁盘精测：4K 随机读/写（direct=1,bs=4k,iodepth=32,numjobs=4,60s）+ 顺序读写
 #   sysbench CPU 单线程/全核各 60s + 内存带宽
-#   stress   超售检测：stress-ng --cpu $(nproc) 持续 20m，同时 mpstat 1 记录 %steal
+#   stress   超售检测：stress-ng --cpu $(nproc) 满载 + mpstat 1 记录 %steal
+#            （时长随档位：quick 5m / standard 10m / full 20m，--stress-mins 可覆盖）
 #   net      公网 Speedtest（跨机 iperf3 用 iperf 子命令单独跑）
 #
 # 注意：
@@ -78,6 +89,29 @@ TIMEOUT_STRESS=1800     # 30m（压测本身 20m）
 TIMEOUT_NET=900         # 15m
 
 ALL_STAGES="env deps yabs pts fio sysbench stress net"
+
+# ---------------------------------------------------------------------------
+# 评测档位（profile）—— 为「轻量云 + 初级用户」场景预设
+# ---------------------------------------------------------------------------
+# 设计依据：实测耗时（腾讯云4C4G 空机，无业务干扰）
+#   pts   1:49:20  ← 占 74%，其中 build-linux-kernel 一项 87 分钟（占全脚本 59%）
+#   stress   20:03 · yabs 7:40 · fio 5:05 · deps 3:08 · sysbench 2:10 · env+net <1min
+#   → 全量约 2 小时 28 分
+#
+# 为什么默认砍 PTS：轻量云用户不会编译内核，也不关心 openssl/ramspeed 跑分；
+# 而**全部差异化指标都在这三项之外**——
+#   磁盘 p99 长尾 → fio  ·  超售 %steal → stress  ·  物理核/超线程 → env
+# 砍掉通用跑分后，quick 档 16 分钟就能拿到 YABS/bench.sh 测不出的数据。
+#
+# profile 只提供默认值；显式 --stages / --pts-tests / --stress-mins 可逐项覆盖。
+PROFILE_QUICK="env deps fio sysbench stress net"
+PROFILE_STANDARD="env deps yabs fio sysbench stress net pts"
+PTS_QUICK=""                          # quick 不跑 PTS
+PTS_STANDARD="compress-7zip redis"    # 只留最直观、最快的两项
+PTS_FULL="compress-7zip openssl build-linux-kernel ramspeed redis"
+STRESS_QUICK=5                        # 5 分钟足够暴露持续超售
+STRESS_STANDARD=10
+STRESS_FULL=20                        # 与历史数据口径一致
 
 # ---------------------------------------------------------------------------
 # 日志与输出
@@ -683,8 +717,11 @@ stage_stress() {
   need_sudo
   local log="$out/stress-ng.log"
   local mplog="$out/mpstat.log"
+  # 压测时长由档位决定（quick 5m / standard 10m / full 20m）。
+  # 5 分钟足以暴露「持续被邻居抢占」——超售很少是瞬时的，但也很少需要 20 分钟才显形。
+  local mins="${CB_STRESS_MINS:-20}"
   {
-    echo "=== stress-ng 全核 20m + mpstat 采样 $(date -Is) ==="
+    echo "=== stress-ng 全核 ${mins}m + mpstat 采样 $(date -Is) ==="
     echo "nproc=$(nproc)"
     # ⚠️ 实测踩坑（天翼云）：部分云厂商的 VM 会屏蔽 AVX/AVX2/FMA/AVX-512 指令集
     #    （该机 CPU flags 只有 sse4_2/aes，无任何 avx），而 stress-ng 默认
@@ -697,10 +734,10 @@ stage_stress() {
       echo "[WARN] 默认 cpu-method 不可用（疑似 VM 屏蔽 AVX），回退 --cpu-method int32"
       echo "  该机 /proc/cpuinfo 含 avx: $(grep -qw avx /proc/cpuinfo && echo 是 || echo 否)"
     fi
-    echo "stress-ng 实际参数: --cpu $(nproc) $METHOD --timeout 20m"
+    echo "stress-ng 实际参数: --cpu $(nproc) $METHOD --timeout ${mins}m"
     mpstat 1 > "$mplog" 2>&1 &
     local mpid=$!
-    timeout "$TIMEOUT_STRESS" stress-ng --cpu "$(nproc)" $METHOD --timeout 20m --metrics-brief
+    timeout "$TIMEOUT_STRESS" stress-ng --cpu "$(nproc)" $METHOD --timeout "${mins}m" --metrics-brief
     echo "stress-ng 退出码=$?"
     kill "$mpid" 2>/dev/null
     wait "$mpid" 2>/dev/null
@@ -815,22 +852,40 @@ remote_exec() {
 # 本地调度：run / status / collect / iperf / summarize
 # ---------------------------------------------------------------------------
 cmd_run() {
-  local name="" stages="$ALL_STAGES" at="" pts_tests="" pts_proxy=""
+  local name="" profile="" stages="" at="" pts_tests="" pts_proxy="" stress_mins=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --name)      name="$2"; shift 2 ;;
-      --stages)    stages="$(echo "$2" | tr ',' ' ')"; shift 2 ;;
-      --at)        at="$2"; shift 2 ;;
-      --pts-tests) pts_tests="$2"; shift 2 ;;
-      --pts-proxy) pts_proxy="$2"; shift 2 ;;
+      --name)        name="$2"; shift 2 ;;
+      --profile)     profile="$2"; shift 2 ;;
+      --stages)      stages="$(echo "$2" | tr ',' ' ')"; shift 2 ;;
+      --at)          at="$2"; shift 2 ;;
+      --pts-tests)   pts_tests="$2"; shift 2 ;;
+      --pts-proxy)   pts_proxy="$2"; shift 2 ;;
+      --stress-mins) stress_mins="$2"; shift 2 ;;
       *) die "未知参数: $1" ;;
     esac
   done
-  [ -n "$name" ] || die "用法: $0 run --name <主机名> [--stages env,deps,...] [--at HH:MM] [--pts-tests \"测试名 ...\"] [--pts-proxy \"127.0.0.1:8894\"]"
+  [ -n "$name" ] || die "用法: $0 run --name <主机名> [--profile quick|standard|full] [--stages env,deps,...] [--at HH:MM] [--pts-tests \"...\"] [--stress-mins N]"
+
+  # 档位展开为默认值；显式传入的参数优先
+  # （: "${var:=default}" 仅在 var 为空时赋值，故命令行给的值得以保留）
+  : "${profile:=quick}"
+  case "$profile" in
+    quick)    : "${stages:=$PROFILE_QUICK}";    : "${pts_tests:=$PTS_QUICK}";    : "${stress_mins:=$STRESS_QUICK}" ;;
+    standard) : "${stages:=$PROFILE_STANDARD}"; : "${pts_tests:=$PTS_STANDARD}"; : "${stress_mins:=$STRESS_STANDARD}" ;;
+    full)     : "${stages:=$ALL_STAGES}";       : "${pts_tests:=$PTS_FULL}";     : "${stress_mins:=$STRESS_FULL}" ;;
+    *) die "未知档位: $profile（可选 quick / standard / full）" ;;
+  esac
   local target; target="$(host_target "$name")"
 
   c_head "在 $name ($target) 上启动评测"
+  case "$profile" in
+    quick)    c_info "档位: quick（约 16 分钟）—— 覆盖轻量云最关心的：磁盘 p99 / 超售 %steal / 物理核识别" ;;
+    standard) c_info "档位: standard（约 40 分钟）—— quick + YABS 交叉验证 + PTS（7-Zip/redis）" ;;
+    full)     c_info "档位: full（约 2.5 小时）—— 全量，含 PTS 内核编译（轻量云一般用不到）" ;;
+  esac
   c_info "阶段: $stages"
+  c_info "压测时长: ${stress_mins} 分钟"
   [ -n "$at" ] && c_info "定时: 远端本地时间 $at 开跑（远端计算，本机可关机）"
 
   # 上传本脚本自身（路径不加引号，让远端的 ~ 正常展开）
@@ -860,6 +915,7 @@ cmd_run() {
     echo '#!/bin/bash'
     [ -n "$pts_tests" ] && echo "export CB_PTS_TESTS='$pts_tests'"
     [ -n "$pts_proxy" ] && echo "export CB_PTS_PROXY='$pts_proxy'"
+    echo "export CB_STRESS_MINS='$stress_mins'"
     echo "cd $REMOTE_BASE || exit 1"
     echo "mkdir -p $REMOTE_OUT"
     if [ -n "$at" ]; then
@@ -1031,6 +1087,20 @@ cmd_summarize() {
   python3 "$REPO_ROOT/scripts/cloud-benchmark-summarize.py" || die "汇总脚本执行失败"
 }
 
+# 单机「人话报告」——面向初级用户：把指标翻译成「会不会卡 / 是不是虚标 / 能跑什么」
+cmd_report() {
+  local name=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name) name="$2"; shift 2 ;;
+      *) die "未知参数: $1" ;;
+    esac
+  done
+  [ -n "$name" ] || die "用法: $0 report --name <主机名>"
+  python3 "$REPO_ROOT/scripts/cloud-benchmark-summarize.py" --report "$name" \
+    || die "报告生成失败（该主机有产物吗？先 run + collect）"
+}
+
 # ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
@@ -1039,6 +1109,7 @@ main() {
   [ $# -gt 0 ] && shift
   case "$cmd" in
     run)       cmd_run "$@" ;;
+    report)    cmd_report "$@" ;;
     status)    cmd_status "$@" ;;
     collect)   cmd_collect "$@" ;;
     iperf)     cmd_iperf "$@" ;;

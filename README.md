@@ -31,37 +31,85 @@ cd cloud-bench
 cp results/hosts.tsv.example results/hosts.tsv
 vim results/hosts.tsv
 
-# 3. 开跑（远端 tmux 后台执行，SSH 断连不中断；全量约 1-2 小时）
+# 3. 开跑（默认 quick 档约 16 分钟；远端 tmux 执行，SSH 断连不中断）
 ./scripts/cloud-benchmark.sh run --name mycloud-2c2g-01
 
-# 4. 看进度 / 回收产物 / 汇总成表
-./scripts/cloud-benchmark.sh status    --name mycloud-2c2g-01
-./scripts/cloud-benchmark.sh collect   --name mycloud-2c2g-01
-./scripts/cloud-benchmark.sh summarize
+# 4. 看进度 / 回收产物
+./scripts/cloud-benchmark.sh status  --name mycloud-2c2g-01
+./scripts/cloud-benchmark.sh collect --name mycloud-2c2g-01
+
+# 5. 出一份「人话报告」——会不会卡 / 有没有虚标 / 能跑什么
+./scripts/cloud-benchmark.sh report  --name mycloud-2c2g-01
 ```
+
+### 三档耗时
+
+| 档位 | 内容 | 耗时 |
+|---|---|---|
+| **`quick`（默认）** | 磁盘 / CPU / 内存 / 网络 / 超售检测 | **约 16 分钟** |
+| `standard` | quick + YABS 交叉验证 + PTS（7-Zip、redis） | 约 40 分钟 |
+| `full` | 全量，含 PTS 内核编译 | 约 2.5 小时 |
+
+**为什么默认只要 16 分钟**：轻量云用户不会在 2C2G 上编译内核，也不关心 openssl 跑分——
+这类通用跑分项恰恰是最耗时的（内核编译单项就占全量的 59%）。
+砍掉它们之后，**全部差异化指标一个不少**：
+
+```
+磁盘 p99 长尾  ← fio      （决定"卡不卡"）
+超售 %steal    ← stress   （决定"稳不稳"）
+物理核识别     ← env      （识破"超线程当核卖"）
+```
+
+16 分钟就能拿到 YABS / bench.sh 那类脚本测不出的数据——这就是本工具存在的理由。
 
 常用参数：
 
 ```bash
---stages env,deps,fio     # 只跑指定阶段（8 个阶段可任选）
+--profile standard|full   # 换档位
+--stages env,deps,fio     # 只跑指定阶段（逐项覆盖档位预设）
+--stress-mins 20          # 压测时长（quick 档默认 5 分钟）
 --at 23:30                # 在**远端**定时开跑（跑生产机时用来卡低峰窗口）
---pts-tests <列表>        # 覆盖 PTS 测试项
+```
+
+### 「人话报告」长什么样
+
+`report` 把数字翻译成结论，专为不熟悉指标的人设计：
+
+```
+【会不会卡？】← 轻量云最该看的一项
+  磁盘 4K 随机读          4,962 IOPS      ⚠️ 偏弱
+  磁盘长尾 p99           952.11 ms        ⚠️ 偏弱
+  → ⚠️ 长尾严重：约 1% 的请求要等几百毫秒，建站会偶发卡顿
+
+【CPU 够用吗？】
+  单核性能                  445 events/s     一般
+  物理核                      1 核（2 线程）  ⚠️ 超线程
+  → 标称 2 核，实际只有 1 个物理核
+
+【内存与网络】
+  内存                        2 GB（标称）
+  → ⚠️ 实测可用仅 1.6G，比标称少 20%（内核/虚拟化占用）
+
+【这台能跑什么？】
+  ✅ 个人博客 / 静态站 / 图床
+  ⚠️ 数据库：能跑，但磁盘长尾会带来偶发卡顿
+  ❌ 编译构建 / 视频转码 / 高并发站点
 ```
 
 > ⚠️ 跑生产机前请先读方法论里的「可比性约束」——业务负载、测试时段都会显著影响成绩。
 
 ## 八个阶段
 
-| 阶段 | 内容 | 关键产出 |
-|---|---|---|
-| `env` | 系统信息、物理核/超线程、指令集、虚拟化类型 | 后续所有对比的前提 |
-| `deps` | 安装 fio / sysbench / iperf3 / stress-ng / PTS | —— |
-| `yabs` | YABS 快速跑分 | 与精测**交叉验证** |
-| `pts` | Phoronix 固定 5 项（7-Zip / openssl / 内核编译 / ramspeed / redis） | 应用层性能 |
-| `fio` | 磁盘精测：4K 随机 + 顺序读写 + **p99 长尾** | 决定"卡不卡" |
-| `sysbench` | CPU 单核/全核 + 内存带宽 | 决定"强不强" |
-| `stress` | 满载 20 分钟 + %steal | 决定"稳不稳"（超售证据） |
-| `net` | Speedtest + 跨机 iperf3 | 带宽真实值 |
+| 阶段 | 内容 | 档位 | 关键产出 |
+|---|---|---|---|
+| `env` | 系统信息、物理核/超线程、指令集、虚拟化类型 | 全部 | 后续所有对比的前提 |
+| `deps` | 安装 fio / sysbench / iperf3 / stress-ng / PTS | 全部 | —— |
+| `fio` | 磁盘精测：4K 随机 + 顺序读写 + **p99 长尾** | 全部 | 决定"卡不卡" |
+| `sysbench` | CPU 单核/全核 + 内存带宽 | 全部 | 决定"强不强" |
+| `stress` | 满载 + mpstat 记 %steal（5 / 10 / 20 分钟随档位） | 全部 | 决定"稳不稳" |
+| `net` | Speedtest + 跨机 iperf3 | 全部 | 带宽真实值 |
+| `yabs` | YABS 快速跑分 | standard+ | 与精测**交叉验证** |
+| `pts` | Phoronix（standard=7-Zip+redis；full=全部 5 项含内核编译） | standard+ | 应用层性能 |
 
 每个阶段的完整命令与参数、以及**读数据时的 6 项可比性约束**，见
 **[docs/methodology.md](docs/methodology.md)**。

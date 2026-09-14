@@ -50,6 +50,32 @@ YABS、bench.sh、融合怪等主流脚本很快很好用，但它们的定位�
 每阶段独立日志，失败不阻塞后续阶段（记入 `failed-stages.txt`）；重复执行会覆盖该阶段产物且不产生重复指标。
 全部长任务在远端 `tmux` 中执行，SSH 断连不中断。
 
+### 先看档位：为什么默认只要 16 分钟
+
+实测全量耗时 **约 2 小时 28 分**，但分布极不均匀：
+
+| 阶段 | 实测耗时 | 占比 |
+|---|---|---|
+| pts（含内核编译 87 分钟） | 1:49:20 | **74%** |
+| stress | 20:03 | 13% |
+| yabs | 7:40 | 5% |
+| fio | 5:05 | 3% |
+| deps / sysbench / env / net | < 6 分钟 | 4% |
+
+**PTS 里最耗时的 `build-linux-kernel` 单项就占全量的 59%**，而轻量云用户不会在
+2C2G 上编译内核。因此按档位裁剪：
+
+| 档位 | 阶段 | 耗时 |
+|---|---|---|
+| `quick`（默认） | env, deps, fio, sysbench, stress(5m), net | ~16 分钟 |
+| `standard` | quick + yabs + pts(7-Zip, redis) | ~40 分钟 |
+| `full` | 全部八阶段（含内核编译） | ~2.5 小时 |
+
+**关键：quick 档不损失任何差异化指标**——磁盘 p99（fio）、超售 %steal（stress）、
+物理核识别（env）全在其中。被砍掉的是与 YABS 重叠的通用跑分。
+
+
+
 ### 1. `env` — 前置检查与系统信息
 
 `lscpu` / `free` / `lsblk` / `os-release` / 虚拟化类型（DMI）→ `system-info.txt`。
